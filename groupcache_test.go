@@ -31,8 +31,8 @@ import (
 
 	"github.com/golang/protobuf/proto"
 
-	pb "github.com/mailgun/groupcache/v2/groupcachepb"
-	"github.com/mailgun/groupcache/v2/testpb"
+	pb "accedo.io/groupcache/v2/groupcachepb"
+	"accedo.io/groupcache/v2/testpb"
 )
 
 var (

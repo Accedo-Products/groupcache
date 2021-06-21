@@ -32,9 +32,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	pb "github.com/mailgun/groupcache/v2/groupcachepb"
-	"github.com/mailgun/groupcache/v2/lru"
-	"github.com/mailgun/groupcache/v2/singleflight"
+	pb "accedo.io/groupcache/v2/groupcachepb"
+	"accedo.io/groupcache/v2/lru"
+	"accedo.io/groupcache/v2/singleflight"
 	"github.com/sirupsen/logrus"
 )
 
@@ -88,8 +88,12 @@ func GetGroup(name string) *Group {
 // completes.
 //
 // The group name must be unique for each getter.
-func NewGroup(name string, cacheBytes int64, getter Getter) *Group {
-	return newGroup(name, cacheBytes, getter, nil)
+func NewGroup(name string, cacheBytes int64, getter Getter, opts ...GroupOpts) *Group {
+	g := newGroup(name, cacheBytes, getter, nil)
+	for _, optFn := range opts {
+		optFn(g)
+	}
+	return g
 }
 
 // DeregisterGroup removes group from group pool
@@ -111,18 +115,27 @@ func newGroup(name string, cacheBytes int64, getter Getter, peers PeerPicker) *G
 		panic("duplicate registration of group " + name)
 	}
 	g := &Group{
-		name:        name,
-		getter:      getter,
-		peers:       peers,
-		cacheBytes:  cacheBytes,
-		loadGroup:   &singleflight.Group{},
-		removeGroup: &singleflight.Group{},
+		name:             name,
+		getter:           getter,
+		peers:            peers,
+		cacheBytes:       cacheBytes,
+		loadGroup:        &singleflight.Group{},
+		removeGroup:      &singleflight.Group{},
+		peerErrorHandler: DefaultPeerErrorHandler,
 	}
 	if fn := newGroupHook; fn != nil {
 		fn(g)
 	}
 	groups[name] = g
 	return g
+}
+
+type GroupOpts func(group *Group)
+
+func PeerErrorHandlerOption(handler PeerErrorHandler) GroupOpts {
+	return func(group *Group) {
+		group.peerErrorHandler = handler
+	}
 }
 
 // newGroupHook, if non-nil, is called right after a new group is created.
@@ -190,6 +203,9 @@ type Group struct {
 
 	// Stats are statistics on the group.
 	Stats Stats
+
+	// peerErrorHandler deals with error occurring during remote loads.
+	peerErrorHandler PeerErrorHandler
 }
 
 // flightGroup is defined as an interface which flightgroup.Group
@@ -355,20 +371,10 @@ func (g *Group) load(ctx context.Context, key string, dest Sink) (value ByteView
 				return value, nil
 			}
 
-			if logger != nil {
-				logger.WithFields(logrus.Fields{
-					"err":      err,
-					"key":      key,
-					"category": "groupcache",
-				}).Errorf("error retrieving key from peer '%s'", peer.GetURL())
-			}
-
-			g.Stats.PeerErrors.Add(1)
-			if ctx != nil && ctx.Err() != nil {
-				// Return here without attempting to get locally
-				// since the context is no longer valid
+			if tryLocally, err := g.peerErrorHandler(ctx, g, key, peer.GetURL(), err); !tryLocally {
 				return nil, err
 			}
+
 			// TODO(bradfitz): log the peer's error? keep
 			// log of the past few for /groupcachez?  It's
 			// probably boring (normal task movement), so not
@@ -628,4 +634,22 @@ type CacheStats struct {
 	Gets      int64
 	Hits      int64
 	Evictions int64
+}
+
+type PeerErrorHandler func(ctx context.Context, group *Group, key string, peerURL string, peerError error) (tryLocally bool, err error)
+
+func DefaultPeerErrorHandler(ctx context.Context, group *Group, key string, peerURL string, err error) (tryLocally bool, e error) {
+
+	if logger != nil {
+		logger.WithError(err).WithField("key", key).Errorf("error retrieving key from peer %q", peerURL)
+	}
+
+	group.Stats.PeerErrors.Add(1)
+	if ctx != nil && ctx.Err() != nil {
+		// Return here without attempting to get locally
+		// since the context is no longer valid
+		return false, err
+	}
+
+	return true, nil
 }
