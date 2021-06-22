@@ -27,10 +27,30 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/pkg/errors"
+
+	"accedo.io/groupcache/v2/consistenthash"
+	pb "accedo.io/groupcache/v2/groupcachepb"
 	"github.com/golang/protobuf/proto"
-	"github.com/mailgun/groupcache/v2/consistenthash"
-	pb "github.com/mailgun/groupcache/v2/groupcachepb"
 )
+
+type BadGroupcacheRequestError struct {
+	message string
+}
+
+type GroupNotFoundError struct {
+	group string
+}
+
+type RemoteLoadError struct {
+	Group string
+	Key   string
+
+	StatusCode int
+	Status     string
+	Body       []byte
+	Err        error
+}
 
 const defaultBasePath = "/_groupcache/"
 
@@ -72,6 +92,10 @@ type HTTPPoolOptions struct {
 	// receives a request.
 	// If nil, uses the http.Request.Context()
 	Context func(*http.Request) context.Context
+
+	// ServerErrorHandler optionally specifies a function that will serialize the error that occurred during the remote load and forward it to the requesting
+	// peer. It may be deserialized on the peer side using a custom PeerErrorHandler if needed.
+	ServerErrorHandler func(context.Context, http.ResponseWriter, *http.Request, error)
 }
 
 // NewHTTPPool initializes an HTTP pool of peers, and registers itself as a PeerPicker.
@@ -109,6 +133,10 @@ func NewHTTPPoolOpts(self string, o *HTTPPoolOptions) *HTTPPool {
 		p.opts.Replicas = defaultReplicas
 	}
 	p.peers = consistenthash.New(p.opts.Replicas, p.opts.HashFn)
+
+	if p.opts.ServerErrorHandler == nil {
+		p.opts.ServerErrorHandler = DefaultServerErrorHandler
+	}
 
 	RegisterPeerPicker(func() PeerPicker { return p })
 	return p
@@ -158,13 +186,21 @@ func (p *HTTPPool) PickPeer(key string) (ProtoGetter, bool) {
 }
 
 func (p *HTTPPool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+
+	var ctx context.Context
+	if p.opts.Context != nil {
+		ctx = p.opts.Context(r)
+	} else {
+		ctx = r.Context()
+	}
+
 	// Parse request.
 	if !strings.HasPrefix(r.URL.Path, p.opts.BasePath) {
 		panic("HTTPPool serving unexpected path: " + r.URL.Path)
 	}
 	parts := strings.SplitN(r.URL.Path[len(p.opts.BasePath):], "/", 2)
 	if len(parts) != 2 {
-		http.Error(w, "bad request", http.StatusBadRequest)
+		p.opts.ServerErrorHandler(ctx, w, r, BadGroupcacheRequestError{message: "invalid request URL (missing path parts)"})
 		return
 	}
 	groupName := parts[0]
@@ -173,14 +209,8 @@ func (p *HTTPPool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Fetch the value for this group/key.
 	group := GetGroup(groupName)
 	if group == nil {
-		http.Error(w, "no such group: "+groupName, http.StatusNotFound)
+		p.opts.ServerErrorHandler(ctx, w, r, GroupNotFoundError{group: groupName})
 		return
-	}
-	var ctx context.Context
-	if p.opts.Context != nil {
-		ctx = p.opts.Context(r)
-	} else {
-		ctx = r.Context()
 	}
 
 	group.Stats.ServerRequests.Add(1)
@@ -196,13 +226,13 @@ func (p *HTTPPool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	value := AllocatingByteSliceSink(&b)
 	err := group.Get(ctx, key, value)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		p.opts.ServerErrorHandler(ctx, w, r, err)
 		return
 	}
 
 	view, err := value.view()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		p.opts.ServerErrorHandler(ctx, w, r, err)
 		return
 	}
 	var expireNano int64
@@ -213,7 +243,7 @@ func (p *HTTPPool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Write the value to the response body as a proto message.
 	body, err := proto.Marshal(&pb.GetResponse{Value: b, Expire: &expireNano})
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		p.opts.ServerErrorHandler(ctx, w, r, err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/x-protobuf")
@@ -265,22 +295,24 @@ func (h *httpGetter) makeRequest(ctx context.Context, method string, in *pb.GetR
 func (h *httpGetter) Get(ctx context.Context, in *pb.GetRequest, out *pb.GetResponse) error {
 	var res http.Response
 	if err := h.makeRequest(ctx, http.MethodGet, in, &res); err != nil {
-		return err
+		return newRemoteLoadError(in, err)
 	}
 	defer res.Body.Close()
-	if res.StatusCode != http.StatusOK {
-		return fmt.Errorf("server returned: %v", res.Status)
-	}
+
 	b := bufferPool.Get().(*bytes.Buffer)
 	b.Reset()
 	defer bufferPool.Put(b)
 	_, err := io.Copy(b, res.Body)
-	if err != nil {
-		return fmt.Errorf("reading response body: %v", err)
+	if res.StatusCode != http.StatusOK {
+		return newRemoteLoadErrorWithResp(in, res, b.Bytes(), errors.Errorf("non-OK response code: %d %s", res.StatusCode, res.Status))
 	}
+	if err != nil {
+		return newRemoteLoadErrorWithResp(in, res, nil, errors.Wrapf(err, "reading response body"))
+	}
+
 	err = proto.Unmarshal(b.Bytes(), out)
 	if err != nil {
-		return fmt.Errorf("decoding response body: %v", err)
+		return newRemoteLoadErrorWithResp(in, res, b.Bytes(), errors.Wrapf(err, "decoding response body"))
 	}
 	return nil
 }
@@ -300,4 +332,54 @@ func (h *httpGetter) Remove(ctx context.Context, in *pb.GetRequest) error {
 		return fmt.Errorf("server returned status %d: %s", res.StatusCode, body)
 	}
 	return nil
+}
+
+func DefaultServerErrorHandler(ctx context.Context, w http.ResponseWriter, r *http.Request, err error) {
+
+	if logger != nil {
+		logger.WithError(err).Debugf("error while retrieving cache entry for request %q", r.URL)
+	}
+
+	switch err.(type) {
+	case BadGroupcacheRequestError:
+		http.Error(w, err.Error(), http.StatusBadRequest)
+	case GroupNotFoundError:
+		http.Error(w, err.Error(), http.StatusNotFound)
+	default:
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+
+}
+
+func (e BadGroupcacheRequestError) Error() string {
+	return e.message
+}
+
+func (e GroupNotFoundError) Error() string {
+	return fmt.Sprintf("group not found: %q", e.group)
+}
+
+func newRemoteLoadError(get *pb.GetRequest, err error) RemoteLoadError {
+	return RemoteLoadError{
+		Group: get.GetGroup(),
+		Key:   get.GetKey(),
+
+		Err: err,
+	}
+}
+
+func newRemoteLoadErrorWithResp(get *pb.GetRequest, resp http.Response, body []byte, err error) RemoteLoadError {
+	return RemoteLoadError{
+		Group: get.GetGroup(),
+		Key:   get.GetKey(),
+
+		StatusCode: resp.StatusCode,
+		Status:     resp.Status,
+		Body:       body,
+		Err:        err,
+	}
+}
+
+func (r RemoteLoadError) Error() string {
+	return fmt.Sprintf("remote load error: %v", r.Err)
 }
