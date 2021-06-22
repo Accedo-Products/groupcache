@@ -88,7 +88,7 @@ func GetGroup(name string) *Group {
 // completes.
 //
 // The group name must be unique for each getter.
-func NewGroup(name string, cacheBytes int64, getter Getter, opts ...GroupOpts) *Group {
+func NewGroup(name string, cacheBytes int64, getter Getter, opts ...GroupOption) *Group {
 	g := newGroup(name, cacheBytes, getter, nil)
 	for _, optFn := range opts {
 		optFn(g)
@@ -130,9 +130,9 @@ func newGroup(name string, cacheBytes int64, getter Getter, peers PeerPicker) *G
 	return g
 }
 
-type GroupOpts func(group *Group)
+type GroupOption func(group *Group)
 
-func PeerErrorHandlerOption(handler PeerErrorHandler) GroupOpts {
+func WithPeerErrorHandler(handler PeerErrorHandler) GroupOption {
 	return func(group *Group) {
 		group.peerErrorHandler = handler
 	}
