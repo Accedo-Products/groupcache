@@ -268,8 +268,8 @@ func (h *httpGetter) makeRequest(ctx context.Context, method string, in *pb.GetR
 	u := fmt.Sprintf(
 		"%v%v/%v",
 		h.baseURL,
-		url.QueryEscape(in.GetGroup()),
-		url.QueryEscape(in.GetKey()),
+		url.PathEscape(in.GetGroup()),
+		url.PathEscape(in.GetKey()),
 	)
 	req, err := http.NewRequest(method, u, nil)
 	if err != nil {
