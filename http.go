@@ -383,3 +383,7 @@ func newRemoteLoadErrorWithResp(get *pb.GetRequest, resp http.Response, body []b
 func (r RemoteLoadError) Error() string {
 	return fmt.Sprintf("remote load error: %v", r.Err)
 }
+
+func (r RemoteLoadError) Unwrap() error {
+	return r.Err
+}
