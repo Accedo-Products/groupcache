@@ -268,8 +268,8 @@ func (h *httpGetter) makeRequest(ctx context.Context, method string, in *pb.GetR
 	u := fmt.Sprintf(
 		"%v%v/%v",
 		h.baseURL,
-		url.QueryEscape(in.GetGroup()),
-		url.QueryEscape(in.GetKey()),
+		url.PathEscape(in.GetGroup()),
+		url.PathEscape(in.GetKey()),
 	)
 	req, err := http.NewRequest(method, u, nil)
 	if err != nil {
@@ -382,4 +382,8 @@ func newRemoteLoadErrorWithResp(get *pb.GetRequest, resp http.Response, body []b
 
 func (r RemoteLoadError) Error() string {
 	return fmt.Sprintf("remote load error: %v", r.Err)
+}
+
+func (r RemoteLoadError) Unwrap() error {
+	return r.Err
 }
