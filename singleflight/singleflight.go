@@ -18,7 +18,10 @@ limitations under the License.
 // mechanism.
 package singleflight
 
-import "sync"
+import (
+	"github.com/pkg/errors"
+	"sync"
+)
 
 // call is an in-flight or completed Do call
 type call struct {
@@ -48,18 +51,21 @@ func (g *Group) Do(key string, fn func() (interface{}, error)) (interface{}, err
 		c.wg.Wait()
 		return c.val, c.err
 	}
-	c := new(call)
+	c := &call{
+		err: errors.Errorf("singleflight leader panicked"),
+	}
 	c.wg.Add(1)
 	g.m[key] = c
 	g.mu.Unlock()
 
+	defer func() {
+		c.wg.Done()
+		g.mu.Lock()
+		delete(g.m, key)
+		g.mu.Unlock()
+	}()
+
 	c.val, c.err = fn()
-	c.wg.Done()
-
-	g.mu.Lock()
-	delete(g.m, key)
-	g.mu.Unlock()
-
 	return c.val, c.err
 }
 
