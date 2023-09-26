@@ -18,12 +18,10 @@ package consistenthash
 
 import (
 	"fmt"
+	"github.com/segmentio/fasthash/fnv1"
 	"math/rand"
 	"net"
 	"testing"
-	"time"
-
-	"github.com/segmentio/fasthash/fnv1"
 )
 
 func TestHashing(t *testing.T) {
@@ -82,7 +80,6 @@ func TestConsistency(t *testing.T) {
 
 func TestDistribution(t *testing.T) {
 	hosts := []string{"a.svc.local", "b.svc.local", "c.svc.local"}
-	rand.Seed(time.Now().Unix())
 	const cases = 10000
 
 	strings := make([]string, cases)

@@ -21,7 +21,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"net/url"
 	"strings"
@@ -247,7 +246,7 @@ func (p *HTTPPool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/x-protobuf")
-	w.Write(body)
+	_, _ = w.Write(body)
 }
 
 type httpGetter struct {
@@ -271,13 +270,11 @@ func (h *httpGetter) makeRequest(ctx context.Context, method string, in *pb.GetR
 		url.PathEscape(in.GetGroup()),
 		url.PathEscape(in.GetKey()),
 	)
-	req, err := http.NewRequest(method, u, nil)
+	// Pass along the context to the RoundTripper
+	req, err := http.NewRequestWithContext(ctx, method, u, nil)
 	if err != nil {
 		return err
 	}
-
-	// Pass along the context to the RoundTripper
-	req = req.WithContext(ctx)
 
 	tr := http.DefaultTransport
 	if h.getTransport != nil {
@@ -325,7 +322,7 @@ func (h *httpGetter) Remove(ctx context.Context, in *pb.GetRequest) error {
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
-		body, err := ioutil.ReadAll(res.Body)
+		body, err := io.ReadAll(res.Body)
 		if err != nil {
 			return fmt.Errorf("while reading body response: %v", res.Status)
 		}

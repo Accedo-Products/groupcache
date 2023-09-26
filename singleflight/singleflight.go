@@ -21,13 +21,15 @@ package singleflight
 import (
 	"github.com/pkg/errors"
 	"sync"
+	"time"
 )
 
 // call is an in-flight or completed Do call
 type call struct {
-	wg  sync.WaitGroup
-	val interface{}
-	err error
+	wg      sync.WaitGroup
+	created time.Time
+	val     interface{}
+	err     error
 }
 
 // Group represents a class of work and forms a namespace in which
@@ -52,7 +54,8 @@ func (g *Group) Do(key string, fn func() (interface{}, error)) (interface{}, err
 		return c.val, c.err
 	}
 	c := &call{
-		err: errors.Errorf("singleflight leader panicked"),
+		created: time.Now().UTC(),
+		err:     errors.Errorf("singleflight leader panicked"),
 	}
 	c.wg.Add(1)
 	g.m[key] = c
@@ -69,9 +72,29 @@ func (g *Group) Do(key string, fn func() (interface{}, error)) (interface{}, err
 	return c.val, c.err
 }
 
+// Count returns the number of currently active single flight entries.
+func (g *Group) Count() int64 {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return int64(len(g.m))
+}
+
+// LongestRunningStartTime returns the timestamp at which the oldest single flight entry in the group was created. May be 0 if there are no running entries.
+func (g *Group) LongestRunningStartTime() time.Time {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	var oldest time.Time
+	for _, e := range g.m {
+		if oldest.IsZero() || e.created.Before(oldest) {
+			oldest = e.created
+		}
+	}
+	return oldest
+}
+
 // Lock prevents single flights from occurring for the duration
 // of the provided function. This allows users to clear caches
-// or preform some operation in between running flights.
+// or perform some operation in between running flights.
 func (g *Group) Lock(fn func()) {
 	g.mu.Lock()
 	defer g.mu.Unlock()

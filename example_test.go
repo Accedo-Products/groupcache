@@ -9,6 +9,7 @@ import (
 	"accedo.io/groupcache/v2"
 )
 
+//nolint:govet // OK
 func ExampleUsage() {
 	/*
 		// Keep track of peers in our cluster and add our instance to the pool `http://localhost:8080`
