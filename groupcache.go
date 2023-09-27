@@ -213,6 +213,8 @@ type Group struct {
 // implementation.
 type flightGroup interface {
 	Do(key string, fn func() (interface{}, error)) (interface{}, error)
+	Count() int64
+	LongestRunningStartTime() time.Time
 	Lock(fn func())
 }
 
@@ -505,14 +507,28 @@ const (
 
 // CacheStats returns stats about the provided cache within the group.
 func (g *Group) CacheStats(which CacheType) CacheStats {
+	var stats CacheStats
 	switch which {
 	case MainCache:
-		return g.mainCache.stats()
+		stats = g.mainCache.stats()
 	case HotCache:
-		return g.hotCache.stats()
+		stats = g.hotCache.stats()
 	default:
-		return CacheStats{}
+		stats = CacheStats{}
 	}
+
+	// Read group-level instant values
+	stats.ActiveSingleFlightLoads = g.loadGroup.Count()
+	if oldest := g.loadGroup.LongestRunningStartTime(); !oldest.IsZero() {
+		stats.SingleFlightLoadOldestAge = time.Since(oldest)
+	}
+
+	stats.ActiveSingleFlightRemoves = g.removeGroup.Count()
+	if oldest := g.removeGroup.LongestRunningStartTime(); !oldest.IsZero() {
+		stats.SingleFlightRemoveOldestAge = time.Since(oldest)
+	}
+
+	return stats
 }
 
 // cache is a wrapper around an *lru.Cache that adds synchronization,
@@ -629,11 +645,18 @@ func (i *AtomicInt) String() string {
 
 // CacheStats are returned by stats accessors on Group.
 type CacheStats struct {
+	// Counters (always increasing)
 	Bytes     int64
 	Items     int64
 	Gets      int64
 	Hits      int64
 	Evictions int64
+
+	// Instantaneous values
+	ActiveSingleFlightLoads     int64
+	SingleFlightLoadOldestAge   time.Duration
+	ActiveSingleFlightRemoves   int64
+	SingleFlightRemoveOldestAge time.Duration
 }
 
 type PeerErrorHandler func(ctx context.Context, group *Group, key string, peerURL string, peerError error) (tryLocally bool, err error)

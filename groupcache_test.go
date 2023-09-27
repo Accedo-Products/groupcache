@@ -234,7 +234,7 @@ func TestCacheEviction(t *testing.T) {
 	for bytesFlooded < cacheSize+1024 {
 		var res string
 		key := fmt.Sprintf("dummy-key-%d", bytesFlooded)
-		stringGroup.Get(dummyCtx, key, StringSink(&res))
+		_ = stringGroup.Get(dummyCtx, key, StringSink(&res))
 		bytesFlooded += int64(len(key) + len(res))
 	}
 	evicts := g.mainCache.nevict - evict0
@@ -384,7 +384,7 @@ func TestAllocatingByteSliceTarget(t *testing.T) {
 	sink := AllocatingByteSliceSink(&dst)
 
 	inBytes := []byte("some bytes")
-	sink.SetBytes(inBytes, time.Time{})
+	_ = sink.SetBytes(inBytes, time.Time{})
 	if want := "some bytes"; string(dst) != want {
 		t.Errorf("SetBytes resulted in %q; want %q", dst, want)
 	}
@@ -423,6 +423,14 @@ func (g *orderedFlightGroup) Do(key string, fn func() (interface{}, error)) (int
 
 func (g *orderedFlightGroup) Lock(fn func()) {
 	fn()
+}
+
+func (g *orderedFlightGroup) LongestRunningStartTime() time.Time {
+	return time.Time{}
+}
+
+func (g *orderedFlightGroup) Count() int64 {
+	return 0
 }
 
 // TestNoDedup tests invariants on the cache size when singleflight is

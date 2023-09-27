@@ -84,7 +84,7 @@ func TestHTTPPool(t *testing.T) {
 	defer func() {
 		for i := 0; i < nChild; i++ {
 			if cmds[i].Process != nil {
-				cmds[i].Process.Kill()
+				_ = cmds[i].Process.Kill()
 			}
 		}
 	}()
@@ -172,7 +172,7 @@ func beChildForTestHTTPPool(t *testing.T) {
 			t.Logf("HTTP request from getter failed with '%s'", err)
 		}
 
-		dest.SetString(strconv.Itoa(*peerIndex)+":"+key, time.Time{})
+		_ = dest.SetString(strconv.Itoa(*peerIndex)+":"+key, time.Time{})
 		return nil
 	})
 	NewGroup("httpPoolTest", 1<<20, getter)
