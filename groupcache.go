@@ -132,6 +132,16 @@ func newGroup(name string, cacheBytes int64, getter Getter, peers PeerPicker) *G
 
 type GroupOption func(group *Group)
 
+// WithPeerPicker allows the group to be created using a different set of peers than the normal set (that is globally set). This may allow using the group with
+// the local node only, for some local LRU + single-flight cache implementation identical to distributed ones. This is a 'cleaner' way of specifying the peers
+// to use for a group rather than relying on the 'portPicker' global variable that the original implementation uses.
+func WithPeerPicker(pickerFn PeerPicker) GroupOption {
+	return func(group *Group) {
+		group.peers = pickerFn
+	}
+}
+
+// WithPeerErrorHandler allows to override the way remote load errors are processed.
 func WithPeerErrorHandler(handler PeerErrorHandler) GroupOption {
 	return func(group *Group) {
 		group.peerErrorHandler = handler
