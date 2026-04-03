@@ -30,7 +30,7 @@ import (
 
 	"accedo.io/groupcache/v2/consistenthash"
 	pb "accedo.io/groupcache/v2/groupcachepb"
-	"github.com/golang/protobuf/proto"
+	"google.golang.org/protobuf/proto"
 )
 
 type BadGroupcacheRequestError struct {
