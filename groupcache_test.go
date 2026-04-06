@@ -160,7 +160,7 @@ func TestGetDupSuppressProto(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		select {
 		case v := <-resc:
-			if *v.Name != *want.Name || *v.City != *want.City {
+			if !proto.Equal(v, want) {
 				t.Errorf(" Got: %v\nWant: %v", v.String(), want.String())
 			}
 		case <-time.After(5 * time.Second):

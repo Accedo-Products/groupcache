@@ -33,6 +33,19 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+const (
+	RemoteLoadSourcePeerHeader = "X-Groupcache-Remote-Load-Source-Peer"
+	ErrorTypeHeader            = "X-Groupcache-Error-Type"
+)
+
+type remoteLoadMetadataContextKey struct{}
+
+type IncomingRemoteLoadMetadata struct {
+	IsRemoteLoad               bool
+	SourcePeer                 string
+	RecursiveRemoteLoadAllowed bool
+}
+
 type BadGroupcacheRequestError struct {
 	message string
 }
@@ -48,7 +61,19 @@ type RemoteLoadError struct {
 	StatusCode int
 	Status     string
 	Body       []byte
-	Err        error
+
+	ErrorType string
+	Err       error
+}
+
+type RecursiveRemoteLoadForbiddenError struct {
+	group string
+	key   string
+
+	determinedDestinationPeer string
+	sourcePeer                string
+
+	recursiveRemoteLoadAllowed bool
 }
 
 const defaultBasePath = "/_groupcache/"
@@ -95,6 +120,11 @@ type HTTPPoolOptions struct {
 	// ServerErrorHandler optionally specifies a function that will serialize the error that occurred during the remote load and forward it to the requesting
 	// peer. It may be deserialized on the peer side using a custom PeerErrorHandler if needed.
 	ServerErrorHandler func(context.Context, http.ResponseWriter, *http.Request, error)
+
+	// If true, a remote load coming from node A into node B - that node B determines to be part of the key ring of another node (either A, C or any other) -
+	// will be forwarded to that other node as a subsequent remote load. This may lead to looping in case A thinks B owns a certain key, while B thinks A owns
+	// it.
+	AllowRecursiveRemoteLoad bool
 }
 
 // NewHTTPPool initializes an HTTP pool of peers, and registers itself as a PeerPicker.
@@ -153,6 +183,7 @@ func (p *HTTPPool) Set(peers ...string) {
 	for _, peer := range peers {
 		p.httpGetters[peer] = &httpGetter{
 			getTransport: p.opts.Transport,
+			selfAddr:     p.self,
 			baseURL:      peer + p.opts.BasePath,
 		}
 	}
@@ -193,6 +224,8 @@ func (p *HTTPPool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		ctx = r.Context()
 	}
 
+	ctx = p.setIncomingRemoteLoadMetadataOnContext(ctx, r.Header)
+
 	// Parse request.
 	if !strings.HasPrefix(r.URL.Path, p.opts.BasePath) {
 		panic("HTTPPool serving unexpected path: " + r.URL.Path)
@@ -223,6 +256,7 @@ func (p *HTTPPool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var b []byte
 
 	value := AllocatingByteSliceSink(&b)
+
 	err := group.Get(ctx, key, value)
 	if err != nil {
 		p.opts.ServerErrorHandler(ctx, w, r, err)
@@ -249,14 +283,37 @@ func (p *HTTPPool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(body)
 }
 
+func (p *HTTPPool) setIncomingRemoteLoadMetadataOnContext(ctx context.Context, rh http.Header) context.Context {
+	m := &IncomingRemoteLoadMetadata{
+		IsRemoteLoad: true,
+
+		RecursiveRemoteLoadAllowed: p.opts.AllowRecursiveRemoteLoad,
+		SourcePeer:                 rh.Get(RemoteLoadSourcePeerHeader),
+	}
+	return context.WithValue(ctx, remoteLoadMetadataContextKey{}, m)
+}
+
+func IncomingRemoteLoadMetadataFromContext(ctx context.Context) *IncomingRemoteLoadMetadata {
+	if ctx == nil {
+		return &IncomingRemoteLoadMetadata{}
+	}
+	m, ok := ctx.Value(remoteLoadMetadataContextKey{}).(*IncomingRemoteLoadMetadata)
+	if !ok {
+		return &IncomingRemoteLoadMetadata{}
+	}
+	return m
+}
+
 type httpGetter struct {
 	getTransport func(context.Context) http.RoundTripper
 	baseURL      string
+	// The address of the local node, that needs to be included in the headers for outgoing requests so that the receiving node can detect recursive remote loads and avoid looping.
+	selfAddr string
 }
 
 // GetURL
-func (p *httpGetter) GetURL() string {
-	return p.baseURL
+func (h *httpGetter) GetURL() string {
+	return h.baseURL
 }
 
 var bufferPool = sync.Pool{
@@ -270,11 +327,15 @@ func (h *httpGetter) makeRequest(ctx context.Context, method string, in *pb.GetR
 		url.PathEscape(in.GetGroup()),
 		url.PathEscape(in.GetKey()),
 	)
+
 	// Pass along the context to the RoundTripper
 	req, err := http.NewRequestWithContext(ctx, method, u, nil)
 	if err != nil {
 		return err
 	}
+
+	// Set self's URL in the header so that the destination node can detect recursive remote calls/calls back to self
+	req.Header.Set(RemoteLoadSourcePeerHeader, h.selfAddr)
 
 	tr := http.DefaultTransport
 	if h.getTransport != nil {
@@ -292,7 +353,11 @@ func (h *httpGetter) makeRequest(ctx context.Context, method string, in *pb.GetR
 func (h *httpGetter) Get(ctx context.Context, in *pb.GetRequest, out *pb.GetResponse) error {
 	var res http.Response
 	if err := h.makeRequest(ctx, http.MethodGet, in, &res); err != nil {
-		return newRemoteLoadError(in, err)
+		errType := fmt.Sprintf("%T", err)
+		if et := res.Header.Get(ErrorTypeHeader); et != "" {
+			errType = et
+		}
+		return newRemoteLoadError(in, errType, err)
 	}
 	defer res.Body.Close()
 
@@ -301,15 +366,15 @@ func (h *httpGetter) Get(ctx context.Context, in *pb.GetRequest, out *pb.GetResp
 	defer bufferPool.Put(b)
 	_, err := io.Copy(b, res.Body)
 	if res.StatusCode != http.StatusOK {
-		return newRemoteLoadErrorWithResp(in, res, b.Bytes(), errors.Errorf("non-OK response code: %d %s", res.StatusCode, res.Status))
+		return newRemoteLoadErrorWithResp(in, res, b.Bytes(), res.Header.Get(ErrorTypeHeader), errors.Errorf("non-OK response code: %d %s", res.StatusCode, res.Status))
 	}
 	if err != nil {
-		return newRemoteLoadErrorWithResp(in, res, nil, errors.Wrapf(err, "reading response body"))
+		return newRemoteLoadErrorWithResp(in, res, nil, res.Header.Get(ErrorTypeHeader), errors.Wrapf(err, "reading response body"))
 	}
 
 	err = proto.Unmarshal(b.Bytes(), out)
 	if err != nil {
-		return newRemoteLoadErrorWithResp(in, res, b.Bytes(), errors.Wrapf(err, "decoding response body"))
+		return newRemoteLoadErrorWithResp(in, res, b.Bytes(), res.Header.Get(ErrorTypeHeader), errors.Wrapf(err, "decoding response body"))
 	}
 	return nil
 }
@@ -337,8 +402,10 @@ func DefaultServerErrorHandler(ctx context.Context, w http.ResponseWriter, r *ht
 		logger.WithError(err).Debugf("error while retrieving cache entry for request %q", r.URL)
 	}
 
+	w.Header().Set(ErrorTypeHeader, fmt.Sprintf("%T", err))
+
 	switch err.(type) {
-	case BadGroupcacheRequestError:
+	case RecursiveRemoteLoadForbiddenError, BadGroupcacheRequestError:
 		http.Error(w, err.Error(), http.StatusBadRequest)
 	case GroupNotFoundError:
 		http.Error(w, err.Error(), http.StatusNotFound)
@@ -356,16 +423,17 @@ func (e GroupNotFoundError) Error() string {
 	return fmt.Sprintf("group not found: %q", e.group)
 }
 
-func newRemoteLoadError(get *pb.GetRequest, err error) RemoteLoadError {
+func newRemoteLoadError(get *pb.GetRequest, errorType string, err error) RemoteLoadError {
 	return RemoteLoadError{
 		Group: get.GetGroup(),
 		Key:   get.GetKey(),
 
-		Err: err,
+		ErrorType: errorType,
+		Err:       err,
 	}
 }
 
-func newRemoteLoadErrorWithResp(get *pb.GetRequest, resp http.Response, body []byte, err error) RemoteLoadError {
+func newRemoteLoadErrorWithResp(get *pb.GetRequest, resp http.Response, body []byte, errorType string, err error) RemoteLoadError {
 	return RemoteLoadError{
 		Group: get.GetGroup(),
 		Key:   get.GetKey(),
@@ -373,7 +441,9 @@ func newRemoteLoadErrorWithResp(get *pb.GetRequest, resp http.Response, body []b
 		StatusCode: resp.StatusCode,
 		Status:     resp.Status,
 		Body:       body,
-		Err:        err,
+
+		ErrorType: errorType,
+		Err:       err,
 	}
 }
 
@@ -383,4 +453,23 @@ func (r RemoteLoadError) Error() string {
 
 func (r RemoteLoadError) Unwrap() error {
 	return r.Err
+}
+
+func newRecursiveRemoteLoadForbiddenError(group, key, sourcePeer, destinationPeer string, recursiveRemoteLoadAllowed bool) RecursiveRemoteLoadForbiddenError {
+	return RecursiveRemoteLoadForbiddenError{
+		group: group,
+		key:   key,
+
+		sourcePeer:                sourcePeer,
+		determinedDestinationPeer: destinationPeer,
+
+		recursiveRemoteLoadAllowed: recursiveRemoteLoadAllowed,
+	}
+}
+
+func (r RecursiveRemoteLoadForbiddenError) Error() string {
+	return fmt.Sprintf("the current node does not own the requested cache key (%q), "+
+		"and the current request is already being handled as part of a remote load. This node either does not allow recursive remote loads (recursiveRemoteLoadAllowed: %t), "+
+		"or the destination node (%q) has been identified as being the same as the source node (%q). Please compute the response on the source node",
+		r.key, r.recursiveRemoteLoadAllowed, r.determinedDestinationPeer, r.sourcePeer)
 }

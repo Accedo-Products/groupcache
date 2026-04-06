@@ -3,8 +3,11 @@ ROOT_DIR:=$(abspath $(MAKE_DIR))
 
 clean:
 	@echo "Cleaning generated files..."
-	@rm $(ROOT_DIR)/groupcachepb/groupcache.pb.go
-	@rm $(ROOT_DIR)/testpb/test.pb.go
+	@rm -f $(ROOT_DIR)/groupcachepb/groupcache.pb.go $(ROOT_DIR)/groupcachepb/example.pb.go $(ROOT_DIR)/testpb/test.pb.go
+
+test:
+	@echo "Running tests..."
+	@go test -v ./...
 
 generate-all:
 	@echo "Generating all files..."
