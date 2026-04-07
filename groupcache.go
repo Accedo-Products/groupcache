@@ -28,6 +28,7 @@ import (
 	"context"
 	"errors"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -362,7 +363,15 @@ func (g *Group) load(ctx context.Context, key string, dest Sink) (value ByteView
 		g.Stats.LoadsDeduped.Add(1)
 		var value ByteView
 		var err error
+
 		if peer, ok := g.peers.PickPeer(key); ok {
+
+			// A remote load is needed. Check first if the request is already itself coming from a remote node, and only allow the request to be recursively sent
+			// to another remote node if recursive remote loads are permitted, and if the destination peer is not the same as the source peer. Otherwise: return
+			// an error that the source node will interpret as requiring local computation of the key.
+			if m := IncomingRemoteLoadMetadataFromContext(ctx); m.IsRemoteLoad && (!m.RecursiveRemoteLoadAllowed || strings.HasPrefix(peer.GetURL(), m.SourcePeer)) {
+				return nil, newRecursiveRemoteLoadForbiddenError(g.name, key, m.SourcePeer, peer.GetURL(), m.RecursiveRemoteLoadAllowed)
+			}
 
 			// metrics duration start
 			start := time.Now()

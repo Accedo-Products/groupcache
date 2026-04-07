@@ -7,10 +7,11 @@ import (
 	"time"
 
 	"accedo.io/groupcache/v2"
+	"accedo.io/groupcache/v2/groupcachepb"
 )
 
 //nolint:govet // OK
-func ExampleUsage() {
+func UsageExample() {
 	/*
 		// Keep track of peers in our cluster and add our instance to the pool `http://localhost:8080`
 		pool := groupcache.NewHTTPPoolOpts("http://localhost:8080", &groupcache.HTTPPoolOptions{})
@@ -42,7 +43,7 @@ func ExampleUsage() {
 				return err
 			}*/
 
-			user := User{
+			user := groupcachepb.User{
 				Id:      "12345",
 				Name:    "John Doe",
 				Age:     40,
@@ -57,7 +58,7 @@ func ExampleUsage() {
 		},
 	))
 
-	var user User
+	var user groupcachepb.User
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
