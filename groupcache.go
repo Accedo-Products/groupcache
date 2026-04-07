@@ -366,10 +366,10 @@ func (g *Group) load(ctx context.Context, key string, dest Sink) (value ByteView
 
 		if peer, ok := g.peers.PickPeer(key); ok {
 
-			// A remote load is needed. Check first if the request is already itself coming from a remote node, and only allow the request to be recursively sent
-			// to another remote node if recursive remote loads are permitted, and if the destination peer is not the same as the source peer. Otherwise: return
-			// an error that the source node will interpret as requiring local computation of the key.
-			if m := IncomingRemoteLoadMetadataFromContext(ctx); m.IsRemoteLoad && (!m.RecursiveRemoteLoadAllowed || strings.HasPrefix(peer.GetURL(), m.SourcePeer)) {
+			// A remote load is needed. Check first if the request is already itself coming from a remote node for the same group and key, and only allow the
+			// request to be recursively sent to another remote node if recursive remote loads are permitted, and if the destination peer is not the same as the
+			// source peer. Otherwise: return an error that the source node will interpret as requiring local computation of the key.
+			if m := IncomingRemoteLoadMetadataFromContext(ctx); (m.IsRemoteLoad && m.Group == g.name && m.Key == key) && (!m.RecursiveRemoteLoadAllowed || strings.HasPrefix(peer.GetURL(), m.SourcePeer)) {
 				return nil, newRecursiveRemoteLoadForbiddenError(g.name, key, m.SourcePeer, peer.GetURL(), m.RecursiveRemoteLoadAllowed)
 			}
 
