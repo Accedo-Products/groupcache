@@ -82,3 +82,19 @@ func (m *Map) Get(key string) string {
 
 	return m.hashMap[m.keys[idx]]
 }
+
+type KeyOwner struct {
+	Key  int
+	Peer string
+}
+
+func (m *Map) KeyOwners() []KeyOwner {
+	owners := make([]KeyOwner, len(m.keys))
+	for i, key := range m.keys {
+		owners[i] = KeyOwner{
+			Key:  key,
+			Peer: m.hashMap[key],
+		}
+	}
+	return owners
+}

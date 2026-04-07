@@ -41,8 +41,11 @@ const (
 type remoteLoadMetadataContextKey struct{}
 
 type IncomingRemoteLoadMetadata struct {
-	IsRemoteLoad               bool
-	SourcePeer                 string
+	IsRemoteLoad bool
+	Group        string
+	Key          string
+	SourcePeer   string
+
 	RecursiveRemoteLoadAllowed bool
 }
 
@@ -203,6 +206,12 @@ func (p *HTTPPool) GetAll() []ProtoGetter {
 	return res
 }
 
+func (p *HTTPPool) KeyOwners() []consistenthash.KeyOwner {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.peers.KeyOwners()
+}
+
 func (p *HTTPPool) PickPeer(key string) (ProtoGetter, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -224,8 +233,6 @@ func (p *HTTPPool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		ctx = r.Context()
 	}
 
-	ctx = p.setIncomingRemoteLoadMetadataOnContext(ctx, r.Header)
-
 	// Parse request.
 	if !strings.HasPrefix(r.URL.Path, p.opts.BasePath) {
 		panic("HTTPPool serving unexpected path: " + r.URL.Path)
@@ -237,6 +244,8 @@ func (p *HTTPPool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	groupName := parts[0]
 	key := parts[1]
+
+	ctx = p.setIncomingRemoteLoadMetadataOnContext(ctx, r.Header, groupName, key)
 
 	// Fetch the value for this group/key.
 	group := GetGroup(groupName)
@@ -283,9 +292,12 @@ func (p *HTTPPool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(body)
 }
 
-func (p *HTTPPool) setIncomingRemoteLoadMetadataOnContext(ctx context.Context, rh http.Header) context.Context {
+func (p *HTTPPool) setIncomingRemoteLoadMetadataOnContext(ctx context.Context, rh http.Header, group, key string) context.Context {
 	m := &IncomingRemoteLoadMetadata{
 		IsRemoteLoad: true,
+
+		Group: group,
+		Key:   key,
 
 		RecursiveRemoteLoadAllowed: p.opts.AllowRecursiveRemoteLoad,
 		SourcePeer:                 rh.Get(RemoteLoadSourcePeerHeader),
@@ -468,8 +480,8 @@ func newRecursiveRemoteLoadForbiddenError(group, key, sourcePeer, destinationPee
 }
 
 func (r RecursiveRemoteLoadForbiddenError) Error() string {
-	return fmt.Sprintf("the current node does not own the requested cache key (%q), "+
+	return fmt.Sprintf("the current node does not own the requested cache key (group:%s, key:%s), "+
 		"and the current request is already being handled as part of a remote load. This node either does not allow recursive remote loads (recursiveRemoteLoadAllowed: %t), "+
-		"or the destination node (%q) has been identified as being the same as the source node (%q). Please compute the response on the source node",
-		r.key, r.recursiveRemoteLoadAllowed, r.determinedDestinationPeer, r.sourcePeer)
+		"or the destination node (%q) has been identified as being the same as the source node (%q) for the same cache group and key. Please compute the response on the source node",
+		r.group, r.key, r.recursiveRemoteLoadAllowed, r.determinedDestinationPeer, r.sourcePeer)
 }
