@@ -38,7 +38,7 @@ type PeerPicker interface {
 	// PickPeer returns the peer that owns the specific key
 	// and true to indicate that a remote peer was nominated.
 	// It returns nil, false if the key owner is the current peer.
-	PickPeer(key string) (peer ProtoGetter, ok bool)
+	PickPeer(key string) (peer ProtoGetter, remote bool)
 	// GetAll returns all the peers in the group
 	GetAll() []ProtoGetter
 }
