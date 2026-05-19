@@ -18,76 +18,93 @@ package consistenthash
 
 import (
 	"fmt"
-	"github.com/segmentio/fasthash/fnv1"
 	"math/rand"
 	"net"
+	"slices"
+	"strconv"
 	"testing"
+
+	"github.com/segmentio/fasthash/fnv1"
 )
 
 func TestHashing(t *testing.T) {
 
 	// Override the hash function to return easier to reason about values. Assumes
 	// the keys can be converted to an integer.
-	hash := New(512, nil)
+	hash := New(5, func(hostCount int) int { return 1 }, func(data []byte) uint64 {
+		i, _ := strconv.Atoi(string(data))
+		return uint64(i)
+	})
 
 	hash.Add("6", "4", "2")
 
-	testCases := map[string]string{
-		"12,000":    "4",
-		"11":        "6",
-		"500,000":   "4",
-		"1,000,000": "2",
+	testCases := map[string]Hosts{
+		"0": {"2"},
+		"1": {"4"},
+		"2": {"6"},
+		"3": {"2"},
+		"4": {"4"},
+		"5": {"2"}, // Wrap around to partition 0 => uses hosts for partition 0
 	}
 
-	for k, v := range testCases {
-		if got := hash.Get(k); got != v {
-			t.Errorf("Asking for %s, should have yielded %s; got %s instead", k, v, got)
+	for k, vs := range testCases {
+		if got := hash.Get(k); !slices.Equal(vs, got) {
+			t.Errorf("Asking for %s, should have yielded one of %s; got %s instead", k, vs, got)
 		}
 	}
 
 	hash.Add("8")
 
-	testCases["11"] = "8"
-	testCases["1,000,000"] = "8"
+	testCases = map[string]Hosts{
+		"0": {"2"},
+		"1": {"4"},
+		"2": {"6"},
+		"3": {"8"},
+		"4": {"2"},
+		"5": {"2"}, // Wrap around to partition 0 => uses hosts for partition 0
+	}
 
-	for k, v := range testCases {
-		if got := hash.Get(k); got != v {
-			t.Errorf("Asking for %s, should have yielded %s; got %s instead", k, v, got)
+	for k, vs := range testCases {
+		if got := hash.Get(k); !slices.Equal(vs, got) {
+			t.Errorf("Asking for %s, should have yielded one of %s; got %s instead", k, vs, got)
 		}
 	}
 }
 
 func TestConsistency(t *testing.T) {
-	hash1 := New(1, nil)
-	hash2 := New(1, nil)
+	hash1 := New(512, func(hostCount int) int { return 10 }, nil)
+	hash2 := New(512, func(hostCount int) int { return 10 }, nil)
 
 	hash1.Add("Bill", "Bob", "Bonny")
 	hash2.Add("Bob", "Bonny", "Bill")
 
-	if hash1.Get("Ben") != hash2.Get("Ben") {
+	if !slices.Equal(hash1.Get("Ben"), hash2.Get("Ben")) {
 		t.Errorf("Fetching 'Ben' from both hashes should be the same")
 	}
 
 	hash2.Add("Becky", "Ben", "Bobby")
 	hash1.Add("Becky", "Ben", "Bobby")
 
-	if hash1.Get("Ben") != hash2.Get("Ben") ||
-		hash1.Get("Bob") != hash2.Get("Bob") ||
-		hash1.Get("Bonny") != hash2.Get("Bonny") {
+	if !slices.Equal(hash1.Get("Ben"), hash2.Get("Ben")) ||
+		!slices.Equal(hash1.Get("Bob"), hash2.Get("Bob")) ||
+		!slices.Equal(hash1.Get("Bonny"), hash2.Get("Bonny")) {
 		t.Errorf("Direct matches should always return the same entry")
 	}
 }
 
 func TestDistribution(t *testing.T) {
 	hosts := []string{"a.svc.local", "b.svc.local", "c.svc.local"}
-	const cases = 10000
+	const (
+		keyCount = 10000
+		replicas = 2
+	)
 
-	strings := make([]string, cases)
+	keys := make([]string, keyCount)
 
-	for i := 0; i < cases; i++ {
+	for i := 0; i < keyCount; i++ {
 		r := rand.Int31()
 		ip := net.IPv4(192, byte(r>>16), byte(r>>8), byte(r))
-		strings[i] = ip.String()
+		keys[i] = ip.String()
 	}
 
 	hashFuncs := map[string]Hash{
@@ -96,7 +113,7 @@ func TestDistribution(t *testing.T) {
 
 	for name, hashFunc := range hashFuncs {
 		t.Run(name, func(t *testing.T) {
-			hash := New(512, hashFunc)
+			hash := New(512, func(hostCount int) int { return replicas }, hashFunc)
 			hostMap := map[string]int{}
 
 			for _, host := range hosts {
@@ -104,13 +121,15 @@ func TestDistribution(t *testing.T) {
 				hostMap[host] = 0
 			}
 
-			for i := range strings {
-				host := hash.Get(strings[i])
-				hostMap[host]++
+			for i := range keys {
+				hostsForKeyspaceSlice := hash.Get(keys[i])
+				for _, h := range hostsForKeyspaceSlice {
+					hostMap[h]++
+				}
 			}
 
 			for host, a := range hostMap {
-				t.Logf("host: %s, percent: %f", host, float64(a)/cases)
+				t.Logf("host: %s, total: %d, percent: %f", host, a, float64(a)/keyCount)
 			}
 		})
 	}
@@ -123,7 +142,7 @@ func BenchmarkGet512(b *testing.B) { benchmarkGet(b, 512) }
 
 func benchmarkGet(b *testing.B, shards int) {
 
-	hash := New(50, nil)
+	hash := New(50, func(hostCount int) int { return 1 }, nil)
 
 	var buckets []string
 	for i := 0; i < shards; i++ {

@@ -18,10 +18,9 @@ limitations under the License.
 package consistenthash
 
 import (
-	"crypto/md5"
-	"fmt"
+	"math"
+	"slices"
 	"sort"
-	"strconv"
 
 	"github.com/segmentio/fasthash/fnv1"
 )
@@ -29,71 +28,118 @@ import (
 type Hash func(data []byte) uint64
 
 type Map struct {
-	hash     Hash
-	replicas int
-	keys     []int // Sorted
-	hashMap  map[int]string
+	hash Hash
+	// Number of keyring slices.
+	partitions int
+
+	hosts                 []string // Sorted
+	hostsForKeyspaceSlice map[int]Hosts
+
+	// Returns the number of hosts that should be considered as "master" nodes for each keyring slice when assigning hosts to keyring slices.
+	replicaFn func(hostCount int) int
 }
 
-func New(replicas int, fn Hash) *Map {
+func New(partitions int, replicaFn func(hostCount int) int, fn Hash) *Map {
 	m := &Map{
-		replicas: replicas,
-		hash:     fn,
-		hashMap:  make(map[int]string),
+		partitions:            partitions,
+		replicaFn:             replicaFn,
+		hash:                  fn,
+		hostsForKeyspaceSlice: make(map[int]Hosts),
 	}
 	if m.hash == nil {
 		m.hash = fnv1.HashBytes64
 	}
+
 	return m
 }
 
-// Returns true if there are no items available.
+type Hosts []string
+
+// Returns true if there are no hosts available.
 func (m *Map) IsEmpty() bool {
-	return len(m.keys) == 0
+	return len(m.hosts) == 0
 }
 
 // Adds some keys to the hash.
-func (m *Map) Add(keys ...string) {
-	for _, key := range keys {
-		for i := 0; i < m.replicas; i++ {
-			hash := int(m.hash([]byte(fmt.Sprintf("%x", md5.Sum([]byte(strconv.Itoa(i)+key))))))
-			m.keys = append(m.keys, hash)
-			m.hashMap[hash] = key
+func (m *Map) Add(hosts ...string) {
+	for _, k := range hosts {
+		if slices.Contains(m.hosts, k) {
+			continue
+		}
+		m.hosts = append(m.hosts, k)
+	}
+	sort.Strings(m.hosts)
+
+	hostIdx := -1
+	nextHost := func() string {
+		hostIdx++
+		if hostIdx > len(m.hosts)-1 {
+			hostIdx = 0
+		}
+		return m.hosts[hostIdx]
+	}
+
+	// Reset the map
+	m.hostsForKeyspaceSlice = make(map[int]Hosts)
+	for i := 0; i < m.partitions; i++ {
+		for j := 0; j < m.replicaFn(len(m.hosts)); j++ {
+			nextHost := nextHost()
+			if !slices.Contains(m.hostsForKeyspaceSlice[i], nextHost) {
+				m.hostsForKeyspaceSlice[i] = append(m.hostsForKeyspaceSlice[i], nextHost)
+			}
 		}
 	}
-	sort.Ints(m.keys)
+
 }
 
-// Gets the closest item in the hash to the provided key.
-func (m *Map) Get(key string) string {
+// Generate a slice of integers evenly distributed across the entire int64 space
+func (m *Map) spread(n int) []uint64 {
+	switch {
+	case n <= 0:
+		return nil
+	case n == 1:
+		return []uint64{0}
+	}
+
+	step := uint64(math.MaxUint64) / uint64(n-1)
+
+	out := make([]uint64, n)
+	for i := range out {
+		out[i] = uint64(i) * step
+	}
+	// Integer division can miss the last element; pin the end.
+	out[n-1] = math.MaxUint64
+	return out
+}
+
+// Gets the set of hosts owning the keyring space closest to the provided key.
+func (m *Map) Get(key string) Hosts {
 	if m.IsEmpty() {
-		return ""
+		return nil
 	}
 
 	hash := int(m.hash([]byte(key)))
 
-	// Binary search for appropriate replica.
-	idx := sort.Search(len(m.keys), func(i int) bool { return m.keys[i] >= hash })
-
-	// Means we have cycled back to the first replica.
-	if idx == len(m.keys) {
-		idx = 0
+	// Match the hash to its keyring slice
+	if hash < 0 {
+		hash = hash * -1
 	}
+	keyspaceSliceId := hash % m.partitions
 
-	return m.hashMap[m.keys[idx]]
+	return m.hostsForKeyspaceSlice[keyspaceSliceId]
 }
 
 type KeyOwner struct {
-	Key  int
-	Peer string
+	Key   int
+	Peers []string
 }
 
 func (m *Map) KeyOwners() []KeyOwner {
-	owners := make([]KeyOwner, len(m.keys))
-	for i, key := range m.keys {
+	owners := make([]KeyOwner, m.partitions)
+	for i := 0; i < m.partitions; i++ {
 		owners[i] = KeyOwner{
-			Key:  key,
-			Peer: m.hashMap[key],
+			Key:   i,
+			Peers: m.hostsForKeyspaceSlice[i],
 		}
 	}
 	return owners

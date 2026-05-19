@@ -21,8 +21,10 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 
@@ -81,7 +83,10 @@ type RecursiveRemoteLoadForbiddenError struct {
 
 const defaultBasePath = "/_groupcache/"
 
-const defaultReplicas = 50
+const (
+	defaultPartitions = 50
+	defaultReplicas   = 1
+)
 
 // HTTPPool implements PeerPicker for a pool of HTTP peers.
 type HTTPPool struct {
@@ -102,9 +107,18 @@ type HTTPPoolOptions struct {
 	// If blank, it defaults to "/_groupcache/".
 	BasePath string
 
-	// Replicas specifies the number of key replicas on the consistent hash.
+	// Partitions specified the number of keyspace slices on the key ring.
 	// If blank, it defaults to 50.
-	Replicas int
+	Partitions int
+
+	// ReplicaFn specifies how to determine the number of peers that should be seen as owning each keyspace slice.
+	// If blank, it defaults to 1, no matter how many nodes are members of the cluster. The local node is included in 'peerCount'.
+	ReplicaFn func(peerCount int) int
+
+	// KeyspaceSliceRemotePeerSelectorFn is used to determine which peer to pick when attempting a remote load once the keyspace slice for the requested key
+	// has been identified.
+	// If blank: a random peer will be selected.
+	KeyspaceSliceRemotePeerSelectorFn func(keyspaceSlicePeers []string) string
 
 	// HashFn specifies the hash function of the consistent hash.
 	// If blank, it defaults to crc32.ChecksumIEEE.
@@ -161,10 +175,19 @@ func NewHTTPPoolOpts(self string, o *HTTPPoolOptions) *HTTPPool {
 	if p.opts.BasePath == "" {
 		p.opts.BasePath = defaultBasePath
 	}
-	if p.opts.Replicas == 0 {
-		p.opts.Replicas = defaultReplicas
+	if p.opts.Partitions == 0 {
+		p.opts.Partitions = defaultPartitions
 	}
-	p.peers = consistenthash.New(p.opts.Replicas, p.opts.HashFn)
+	if p.opts.ReplicaFn == nil {
+		p.opts.ReplicaFn = func(peerCount int) int { return defaultReplicas }
+	}
+	if p.opts.KeyspaceSliceRemotePeerSelectorFn == nil {
+		p.opts.KeyspaceSliceRemotePeerSelectorFn = func(keyslicePeers []string) string {
+			// Pick one of the owning peers at random.
+			return keyslicePeers[rand.Intn(len(keyslicePeers))]
+		}
+	}
+	p.peers = consistenthash.New(p.opts.Partitions, p.opts.ReplicaFn, p.opts.HashFn)
 
 	if p.opts.ServerErrorHandler == nil {
 		p.opts.ServerErrorHandler = DefaultServerErrorHandler
@@ -180,7 +203,7 @@ func NewHTTPPoolOpts(self string, o *HTTPPoolOptions) *HTTPPool {
 func (p *HTTPPool) Set(peers ...string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.peers = consistenthash.New(p.opts.Replicas, p.opts.HashFn)
+	p.peers = consistenthash.New(p.opts.Partitions, p.opts.ReplicaFn, p.opts.HashFn)
 	p.peers.Add(peers...)
 	p.httpGetters = make(map[string]*httpGetter, len(peers))
 	for _, peer := range peers {
@@ -218,8 +241,8 @@ func (p *HTTPPool) PickPeer(key string) (ProtoGetter, bool) {
 	if p.peers.IsEmpty() {
 		return nil, false
 	}
-	if peer := p.peers.Get(key); peer != p.self {
-		return p.httpGetters[peer], true
+	if keyspaceSlicePeers := p.peers.Get(key); len(keyspaceSlicePeers) > 0 && !slices.Contains(keyspaceSlicePeers, p.self) {
+		return p.httpGetters[p.opts.KeyspaceSliceRemotePeerSelectorFn(keyspaceSlicePeers)], true
 	}
 	return nil, false
 }
